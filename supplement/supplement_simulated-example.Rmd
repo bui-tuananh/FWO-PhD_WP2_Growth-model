@@ -1,0 +1,744 @@
+---
+title: "Supplement: Simulated example for fitting Quince model to growth data using hidden Markov model"
+author: |
+  **Tuan Anh Bui<sup>1,2</sup>, 
+   Klaas Sys<sup>2</sup>,
+   Jochen Depestele<sup>2</sup>,
+   Marleen De Troch<sup>1</sup>,
+   Karen Bekaert<sup>2</sup>,
+   Jan Jaap Poos<sup>3,4</sup>**  
+  <sup>1</sup> Ghent University, Department of Biology, Marine Biology, Krijgslaan 281/S8, Ghent, Belgium <br>
+  <sup>2</sup> Flanders Research Institute for Agriculture, Fisheries and Food (ILVO), Ostend, Belgium <br>
+  <sup>3</sup> Aquaculture and Fisheries Group, Wageningen University and Research, Wageningen, The Netherlands <br>
+  <sup>4</sup> Wageningen Marine Research, Wageningen University and Research, IJmuiden, The Netherlands
+output:
+  html_document:
+    toc: true
+date: "`r Sys.Date()`"
+bibliography: supplement_bib.bib
+---
+
+This file contains example code to develop the hidden Markov model - Quince model (HMM-Quince model), to simulate individual growth data, and to fit the model to the data to estimate age at maturity and other life-history traits.
+
+First we load the required libraries and create some functions to be used later.
+
+```{r message=FALSE, warning=FALSE}
+# load required libraries
+library(tidyverse)     # transform data 
+library(TMB)           # develop and fit model
+library(boot)          # get logit function
+library(data.table)    # transform data
+
+# functions
+# constrain value (-1,1)
+itrans <- function(x)(2/(1 + exp(-2*x))-1)
+
+# reverse itrans
+itrans_rev <- function(x)(log(2/(x+1)-1)/(-2))
+
+# transform optimisation outputs
+transpar <- function(opt){
+  
+  itrans <- function(x)(2/(1 + exp(-2*x))-1)
+  
+  par_names <- names(opt$par)
+  pars <- opt$par
+  for(i in 1:length(pars)){
+    if(grepl("log", par_names[i]) & !grepl("logit", par_names[i])){
+      pars[i] <- exp(pars[i])
+      par_names[i] <- unlist(strsplit(par_names[i],"_"))[2]
+    }
+    if(grepl("logit", par_names[i])){
+      pars[i] <- boot::inv.logit(pars[i])
+      par_names[i] <- unlist(strsplit(par_names[i],"_"))[2]
+    }
+    if(grepl("trans", par_names[i])){
+      pars[i] <- itrans(pars[i])
+      par_names[i] <- unlist(strsplit(par_names[i],"_"))[2]
+    }
+  }
+  names(pars) <- par_names
+  pars
+}
+```
+
+# 1. HMM-Quince model development
+
+The HMM-Quince model is developed in C++ in order to be fitted using TMB package. The development of the model is specified below.
+
+```{r}
+"
+#include <TMB.hpp>
+
+// helper functions for NA handling
+template<class Type>
+bool isNA(Type x){
+  return R_IsNA(asDouble(x));
+}
+
+template<class Type>
+bool isNAINT(int x){
+  return NA_INTEGER==x;
+}
+
+template <class Type>
+Type itrans(Type x){ // scaled ilogit
+  return Type(2)/(Type(1) + exp(-Type(2) * x)) - Type(1);
+}
+
+
+// function to transform initial state vector
+// n-1 parameters required for n states (sum == 1)
+template <class Type>
+vector<Type> delta_transform(vector<Type> delta_in)
+{
+  vector<Type> res_unscaled(delta_in.size()+1);
+  res_unscaled(0) = 1;
+  for(int i = 1; i<res_unscaled.size();i++){
+    res_unscaled(i) = exp(delta_in(i-1));
+  }
+  return res_unscaled/res_unscaled.sum();
+}
+
+template<class Type>
+Type objective_function<Type>::operator() ()
+{
+  /// I. DATA & PARAMETER SECTION ///
+  
+  // 1. global variables
+  DATA_INTEGER(n_states);                       // number of states
+  DATA_IVECTOR(growth_first_idx);               // first index of each growth trajectory in the data
+  
+  // 2. state transition model
+  // linear covariates
+  DATA_MATRIX(beta_linear_covs);                // Intercept and linear covariate for the transition probability matrix
+  
+  // 3. covariates/observations & indexes
+  // linear effects
+  DATA_VECTOR(age);                               // covariates in the growth models
+  // the observations
+  DATA_MATRIX(len);                               // vector with length-at-age observations      
+  //DATA_IVECTOR(keyVar);                         // vector that allows to define the variance parameter by state
+  DATA_IVECTOR(id);                               // vector fish id
+  
+  // 4. initial state parameters
+  //PARAMETER_VECTOR(log_delta);                  // initial state probability parameters
+  
+  // 5. transition matrix parameters
+  PARAMETER_MATRIX(log_beta_linear_pars);          // parameters of linear covariates that govern the state transition probablities
+  
+  // 6. parameters of the Quince growth model
+  PARAMETER(v0);             // size at age 0 
+  PARAMETER(log_h);          // potential annual growth rate, h > 0
+  PARAMETER(logit_alpha);    // proportion of the growing season in the first adult year devoted to growth (0 < alpha < 1)
+  PARAMETER(logit_chi);      // indicator of the annual decrease rate of alpha (0 < chi < 1)
+  // Tmat is defined below
+
+  
+  // 7. observation variance
+  PARAMETER(log_prec);        // precision
+  PARAMETER(log_sd_h);        // standard deviation h
+  PARAMETER(log_sd_tmat);     // standard deviation Tmat
+  
+  PARAMETER_VECTOR(trans_rho); // correlation h and Tmat
+  PARAMETER_MATRIX(mu_random); // matrix of random effects: log_h, log_Tmat
+  
+  /// II. MODEL SECTION ///
+  
+  // 1. parameter transformation: working scale to natural scale
+  
+  // slope maturing probability and Tmat
+  matrix<Type> beta_linear_pars = (log_beta_linear_pars.array());   
+  beta_linear_pars(0,0) = exp(beta_linear_pars(0,0)); // slope maturing prob > 0
+  beta_linear_pars(1,0) = exp(beta_linear_pars(1,0)); // Tmat > 0
+  
+  //variance covariance matrix
+  // sd_h^2                    rho_h_Tmat*sd_h*sd_Tmat         
+  // rho_h_Tmat*sd_h*sd_Tmat   sd_Tmat^2                       
+  matrix<Type> SigmaMV(2, 2);
+  SigmaMV.setZero();
+  // diagonal
+  Type rho_h_tmat = itrans(trans_rho(0)); //transform trans_rho to rho [-1,1]
+  SigmaMV(0,0) = exp(log_sd_h)*exp(log_sd_h);
+  SigmaMV(1,1) = exp(log_sd_tmat)*exp(log_sd_tmat);
+  // off-diagonal
+  SigmaMV(0,1) = rho_h_tmat*exp(log_sd_h)*exp(log_sd_tmat);
+  SigmaMV(1,0) = SigmaMV(0,1);
+  
+  // individual h and Tmat
+  vector<Type> h(mu_random.cols()); 
+  vector<Type> Tmat(mu_random.cols()); 
+  for(int i = 0; i < mu_random.cols(); i++) {
+    h(i) = exp(log_h)*exp(mu_random(0,i));
+    Tmat(i) = beta_linear_pars(1,0)*exp(mu_random(1,i));
+  }
+  
+  // precision, alpha, chi, k
+  Type prec = exp(log_prec);
+  Type alpha = invlogit(logit_alpha);
+  Type chi = invlogit(logit_chi);
+  Type k = -log(chi);
+  
+  // 2. derived parameters & variables
+  vector<Type> vT = v0 + h*Tmat;                    //length at last juvenile age 
+  vector<Type> vinf = vT+((h*alpha)/(1-chi));       //asymptotic length
+  vector<Type> vc = vT + h*(alpha - chi)/(1 - chi); //theoretical 'intersect size' 
+  
+  int n_obs = len.size(); // number of observations
+
+  // initial state distribution (Pr(juvenile) = 1, Pr(adult) = 0)
+  vector<Type> delta(n_states);
+  delta  = delta *0;
+  delta(0)=1;
+  
+  // 3. Compute likelihood of observations for each state
+
+  // matrix to store the expected length for each observation for each stage
+  matrix<Type> mu(n_obs,n_states);
+  mu.setZero();
+  
+  for(int i = 0; i < n_obs; i++){
+    for(int j = 0; j < n_states; j++){
+      if(j == 0){
+        // immature growth;
+        mu(i,j) = v0 + age(i) * h(id(i));                   
+        
+      }
+      if(j == 1){
+        // adult growth
+        mu(i,j) = vinf(id(i)) - (vinf(id(i)) - vT(id(i)))*exp(-k*(age(i)-Tmat(id(i))));  
+      }
+    }
+  }
+  
+  // calculate the probabilities of the data across all data streams. 
+  // Here we only have 1 data stream: length-at-age but the model can be extended for multiple streams
+  matrix<Type> allProbs(n_obs,n_states);
+  allProbs.setOnes();
+  
+  int nr_data_streams = len.cols();  // we only have a single observation at each time step
+  
+  array<Type> dataProb(nr_data_streams,n_obs,n_states);
+  for(int d = 0; d < nr_data_streams; d++){  
+    vector<Type> observed = len.col(d);
+    for(int state = 0; state < n_states; state++){
+      for(int i=0;i<n_obs;i++) {
+        
+        if (isNA(observed(i))){
+          dataProb(d,i,state) = 1;
+        } else {
+          dataProb(d,i,state) = dnorm(observed(i), mu(i,state), mu(i,state)/prec, false);  // gamma/lognormal distribution may be more appropriate (strictly positive)
+        }
+        allProbs(i,state) = allProbs(i,state) * dataProb(d,i,state);
+      }
+    }
+  }
+  
+  // 4. Computation of transition probability matrix trMat 
+  
+  //-------------------------------------------------------------
+  // calculate the log probabilities
+  //-------------------------------------------------------------
+  
+  int nr_transitions = n_states * (n_states-1); 
+  matrix<Type> g_mat(n_obs,nr_transitions);
+  
+  // initialize a transition probability matrix for each state (3d array)
+  array<Type> trMat(n_states,n_states,n_obs);   
+  trMat.setZero();                              
+  Type pMat = 0;
+  
+  for(int o = 0; o < n_obs; o++) {
+    pMat = 1/(1+exp(beta_linear_pars(0,0)*beta_linear_covs(o,0)*(Tmat(id(o)) - beta_linear_covs(o,1))));
+    trMat(0,0,o) = 1 - pMat;
+    trMat(0,1,o) = pMat;
+    trMat(1,0,o) = 0;
+    trMat(1,1,o) = 1;
+  }
+  
+  // nll
+  // initialization 
+  Type nll = 0;
+
+  //random effects
+  // mu_random
+  int n_random = mu_random.cols(); //ncol(mu_random) 
+  
+  using namespace density;
+  MVNORM_t<Type> neg_log_dmvnorm(SigmaMV);
+  
+  for(int i=0; i < n_random; i++)
+  {
+      nll += neg_log_dmvnorm(mu_random.col(i));
+  }  
+ 
+  // 6. Forward algorithm  ***bring it all together*** 
+  
+  matrix<Type> Gamma(n_states,n_states);           // store values of the transition matrix for observation i      
+  matrix<Type> lalpha(n_obs,n_states);             // matrix that stores output for residuals
+  
+  // some objects to store data while looping
+  int z=0;                               
+  vector<Type> alfa(n_states);          // alpha was already declared, used alfa instead
+  vector<Type> alpha_vec(n_obs);
+  matrix<Type> alpha_mat(1,n_states);
+  matrix<Type> alpha_gamma(1,n_states);
+  vector<Type> alpha_gamma_vec(n_states);
+  vector<Type> probvec(n_states); 
+  
+  for(int i = 0; i < n_obs; i++) {
+    
+    // take the right slice from the transition state probability matrix (probably, a short-cut code exists to do so)
+    for(int nrows = 0; nrows < n_states; nrows++){
+      for(int ncols = 0; ncols < n_states; ncols++){
+        Gamma(nrows,ncols) = trMat(nrows,ncols,i);
+      }
+    }
+    
+    if(z < growth_first_idx.size() && i == (growth_first_idx(z)-1)) {
+      // if 'i' is the 'z'-th element of 'growth_first_idx', switch to the next time series
+      z++;
+      probvec = allProbs.row(i);
+      alfa = delta * probvec;  //elementwise product: probabilities first state * state probabilities
+    } 
+    else {
+      alpha_mat.row(0) = alfa ;
+      alpha_gamma = alpha_mat * Gamma;
+      alpha_gamma_vec = alpha_gamma.row(0);  // matrix to vector
+      probvec = allProbs.row(i);
+      alfa = alpha_gamma_vec * probvec;
+    }
+    alpha_vec(i) = alfa.sum();
+    nll -= log(alfa.sum());
+    alfa = alfa/alfa.sum();
+    lalpha.row(i) = log(alfa) - nll;
+  }
+  
+  /// III. REPORT SECTION ///
+  
+  // REPORT
+  REPORT(v0);
+  REPORT(h);
+  REPORT(Tmat); 
+  REPORT(alpha);
+  REPORT(chi);
+  REPORT(vT) ;
+  REPORT(vinf);
+  REPORT(vc);
+  REPORT(mu);
+  REPORT(mu_random);
+  REPORT(rho_h_tmat);
+  
+  REPORT(delta);
+  REPORT(allProbs);
+  REPORT(dataProb);
+  REPORT(trMat);
+  REPORT(g_mat);
+  
+  // ADREPORT
+  // ADREPORT(delta);
+  ADREPORT(v0);
+  Type h_mean = exp(log_h);
+  ADREPORT(h_mean);
+  ADREPORT(h);
+  Type Tmat_mean = beta_linear_pars(1,0);
+  ADREPORT(Tmat_mean);
+  ADREPORT(Tmat);
+  ADREPORT(alpha);
+  ADREPORT(chi);
+  ADREPORT(vT);
+  ADREPORT(vinf);
+  ADREPORT(vc);
+  Type sd_h = exp(log_sd_h);
+  Type sd_tmat = exp(log_sd_tmat);
+  ADREPORT(sd_h);
+  ADREPORT(sd_tmat);
+  ADREPORT(rho_h_tmat);
+  ADREPORT(prec);
+  ADREPORT(mu);
+  
+  // Prediction population mean  
+  Type vT_mean = v0 + h_mean*Tmat_mean;                    // length at last juvenile age 
+  Type vinf_mean = vT_mean + ((h_mean*alpha)/(1-chi));     // asymptotic length
+  Type vc_mean = vT_mean + h_mean*(alpha - chi)/(1 - chi); // theoretical 'intersect size' 
+  
+  int max_age = 15;  // maximum age for prediction
+  vector<Type> pred_mean_juv(max_age);
+  vector<Type> pred_mean_adu(max_age);
+  vector<Type> g_prime_mean(max_age);
+  for(int i = 0; i < max_age; i++){
+        Type a = i+1; // age (+1 as index starts from 0)
+    
+        // immature growth;
+        pred_mean_juv(i) = v0 + a*h_mean;
+
+        // adult growth
+        pred_mean_adu(i) = vinf_mean - (vinf_mean - vT_mean)*exp(-k*(a-Tmat_mean));
+
+        // g_prime
+        g_prime_mean(i) = (3*h_mean/(vinf_mean - vc_mean))*(1 - (vc_mean/pred_mean_adu(i)));
+    }
+
+  ADREPORT(vT_mean);
+  ADREPORT(vinf_mean);
+  ADREPORT(vc_mean);
+  ADREPORT(pred_mean_juv);
+  ADREPORT(pred_mean_adu);
+  ADREPORT(g_prime_mean);
+  
+  // nll
+  return nll;
+}
+" -> hmm_quince_model
+```
+
+After developing the model, we save the model into a .cpp file.
+
+```{r}
+write(hmm_quince_model, file = "hmm_quince_model.cpp")
+```
+
+Then, we compile and load the model so that the model is ready to be used.
+
+```{r, eval=F}
+# compile model
+compile("hmm_quince_model.cpp")
+```
+
+```{r}
+# load model
+dyn.load(dynlib("hmm_quince_model"))
+```
+
+# 2. Data simulation
+
+We simulate individual growth data based on Quince model. Population-mean parameters (*l*~0~ = 30 mm, *h* = 115 mm/year, *T* = 1.80 year, 𝛼 = 0.35, 𝜒 = 0.75) were based on the estimates obtained by applying the HMM-Quince to the real dataset of North Sea sole. Individual-random-effect parameters (*σ~h~* = 0.2, *σ~T~* = 0.2, *ρ(h,T)* = -0.7) were based on @brunel2013estimating. Observational errors, drawn from a normal distribution with mean 0 and precision p, were added to all simulated observations. A high precision (p = 300) was used to minimise the observational error. Therefore, the main source of variation in the simulated data came from individual variation, which is caused by the co-variation of growth rate h and age at maturity T, instead of observational error.
+
+The simulated data included 250 individuals with age ranging from 5 to 15. The number of individuals per age group were based on the beam trawl survey data for North Sea sole (1985-2021) [@datras2023] to make the data as realistic as possible (Table 1)
+
+Table 1. Number of individuals and the proportion over the total number of individuals by age group (age 5-15) of the beam trawl survey data for North Sea sole (1985-2021) [@datras2023] and simulated data used in this study.
+
+| Data | Count or proportion | Age 5 | Age 6 | Age 7 | Age 8 | Age 9 | Age 10 | Age 11 | Age 12 | Age 13 | Age 14 | Age 15 |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| Survey (n = 3367) | Count | 1653 | 778 | 428 | 222 | 110 | 74 | 41 | 29 | 14 | 14 | 4 |
+| Survey (n = 3367) | Proportion | 0.491 | 0.231 | 0.127 | 0.066 | 0.033 | 0.022 | 0.012 | 0.009 | 0.004 | 0.004 | 0.001 |
+| Simulated (n = 250) | Count | 122 | 58 | 32 | 16 | 8 | 6 | 3 | 2 | 1 | 1 | 1 |
+| Simulated (n = 250) | Proportion | 0.488 | 0.232 | 0.128 | 0.064 | 0.032 | 0.024 | 0.012 | 0.008 | 0.004 | 0.004 | 0.004 |
+
+We create a *fn_sim()* function to simulate the data.
+
+```{r}
+# function to simulate the data
+fn_sim <- function(seed = 2018, # seed for random generator, allowing reproducibility 
+                   v0 = 30, # size at age 0 (l0)
+                   h = 115, # potential annual growth rate
+                   Tmat = 1.8, # age at maturity (last age at juvenile state)
+                   alpha = 0.35, # proportion of the growing season in the first adult year devoted to growth
+                   chi = 0.75, # indicator of the annual decrease rate of α
+                   k = -log(chi), # rate of deceleration of growth 
+                   
+                   precision = 300, # precision (mu/sd)
+                   sigma_h_ind = 0.2, # standard deviation of individual random effect in h
+                   sigma_Tmat_ind = 0.2, # standard deviation of individual random effect in Tmat
+                   rho_h_tmat = -0.7, # correlation between individual random effects in h and T 
+
+                   n_ind = 250, # number of individual
+                   max_age = 15 # maximum age
+                   ) {
+  
+  set.seed(seed) # set seed to allow reproducibility
+    
+  #### true data
+  id = seq(1, n_ind)        # fish id
+  age = seq(1,max_age)      # age
+  
+  # variance covariance matrix
+  SigmaMV = matrix(0, 2, 2)
+  diag(SigmaMV) = c(sigma_h_ind^2, sigma_Tmat_ind^2)
+  SigmaMV[1,2]  = rho_h_tmat * sigma_h_ind * sigma_Tmat_ind
+  SigmaMV[2,1]  = SigmaMV[1,2]
+ 
+  # random effects of h and Tmat
+  mu_random <- mvtnorm::rmvnorm(n_ind, c(0, 0), SigmaMV) 
+  random_h_ind = mu_random[,1]
+  random_Tmat_ind = mu_random[,2]
+
+  h_ind = exp(log(h))*exp(random_h_ind) # individual h
+  Tmat_ind = Tmat*exp(random_Tmat_ind)  # individual Tmat
+
+  # derived parameters
+  vT_ind = v0 + h_ind*Tmat_ind #length at last juvenile age - mm (eq 9)
+  vinf_ind = vT_ind + h_ind*alpha/(1 - chi) #length at infinity - mm (eq9)
+  vc_ind = vT_ind + h_ind*(alpha - chi)/(1 - chi) #theoretical "intersect size"; if vc > 0 -> hyperallometric reproduction
+  
+  #### simulated data 
+  data_ind = tibble(
+    id = rep(id, each = max_age),
+    age = rep(age, n_ind),
+    h = rep(h_ind, each = max_age),
+    alpha = alpha,
+    chi = chi,
+    k = k,
+    Tmat = rep(Tmat_ind, each = max_age),
+    vT = rep(vT_ind, each = max_age),
+    vinf = rep(vinf_ind, each = max_age),
+    vc = rep(vc_ind, each = max_age)) %>%
+    # true data
+    mutate(vt_true = if_else(age <= Tmat, 
+                             v0 + h*age,
+                             vinf - (vinf - vT)*exp(-k*(age - Tmat)))) %>%
+    # simulated data
+    mutate(random = rnorm(n_ind*max_age, mean = 0, sd = vt_true/precision),
+           vt_sim = if_else(age <= Tmat, 
+                            v0 + h*age + random,
+                            vinf - (vinf - vT)*exp(-k*(age - Tmat)) + random),
+           g_prime = if_else(age <= Tmat, 
+                       NA,
+                       ((3*h)/(vinf - vc))*(1 - (vc/vt_sim)))
+           )
+  
+  ## population data ----
+  samp.size <- c(122, 58, 32, 16, 8, 6, 3, 2, 1, 1, 1) # sample size by age at capture (5-15)
+  names(samp.size) <- as.character(seq(5,15))
+  # assign age at capture for each fish
+  df_samp.size = tibble(age = rep(seq(5, max_age), times = samp.size),
+                        id = seq(1, n_ind))
+  
+  # population data, where fish have age at capture 5-15 and sample size as in samp.size
+  data_pop <- tibble()
+  for(i in 5:max_age) {
+    df_samp.size_sub <- df_samp.size %>% filter(age == i)
+    df_temp <- data_ind %>% filter(age <= i, id %in% df_samp.size_sub$id) 
+    
+    data_pop <- bind_rows(data_pop, df_temp)
+  }
+  
+  # add age at capture 
+  data_pop <- data_pop %>% 
+    group_by(id) %>%
+    mutate(age_at_capture = max(age))
+  
+  # plot
+  p <- ggplot() +
+    geom_point(data = data_pop, aes(x = age, y = vt_sim, group = id), alpha = 0.3) +
+    geom_line(data = data_pop, aes(x = age, y = vt_true, group = id)) +
+    labs(x = "Age (year)",
+         y = "Length (mm)") +
+    theme_bw()
+  
+  # return data and plot
+  return(list(data_pop, p))
+}
+```
+
+# 3. Model fitting
+
+First, we generate the data using the *fn_sim()* function.
+
+```{r}
+data <- fn_sim(seed = 2)[[1]]
+head(data)
+```
+
+We can check how the data look like using the *fn_sim()* function.
+
+```{r}
+fn_sim(seed = 2)[[2]]
+```
+
+Prior to the analysis, we need to add observations for age 0 and create a list of indices for the first observation of individual fish growth trajectories.
+
+```{r}
+# add observations (NA) for age 0
+setDT(data)               # convert to datatable class
+setorder(data, id, age)   # rearrange by id and age 
+dat.ls <- split(data, f = data$id)
+dat.ls <- lapply(dat.ls, function(x){
+    x0 <- x[1,]
+    x0$age = 0
+    x0$vt_sim = NA
+    rbind(x0,x)
+  })
+data <- do.call("rbind", dat.ls)
+
+# list of indices of the first observations
+ids <- c(1,1+cumsum(table(data$id))) # index corresponding to the first observation of an individual fish growth trajectory 
+ids <- ids[-length(ids)]             # figure out where the data starts
+names(ids) <- sort(unique(data$id))
+```
+
+Second, we generate the lists of 1000 random values for each parameters.
+
+```{r}
+set.seed(2)
+# median v0 and h
+v0_med <- median(data$vt_sim[data$age==1] - (data$vt_sim[data$age==2]-data$vt_sim[data$age==1]))
+h_med <- median(data$vt_sim[data$age==2]-data$vt_sim[data$age==1])
+  
+# list of random values for initial parameters
+ini_loga <- round(log(100),1) #fixed the slope maturing probability at 100
+list_tmat <- runif(1000, min = 1, max = 3) #Tmat 1-3
+list_v0 <- runif(1000, min = v0_med - 0.5*v0_med, max = v0_med + 0.5*v0_med)
+list_h <- runif(1000, min = h_med - 0.5*h_med, max = h_med + 0.5*h_med)
+list_alpha <- runif(1000, min = 0.3, max = 0.7) #assume alpha within 0.3-0.7
+list_chi <- runif(1000, min = 0.3, max = 0.7) #assume chi within 0.3-0.7
+# prec <- 2 - high value for sigma (numerically more stable)
+list_sd <- runif(1000, min = 0.1, max = 1) # assume sd within 0-1
+list_rho <- runif(1000, min = -1, max = 1) # rho -1 to 1  
+```
+
+Finally, we fit the model. Prior to fitting the model, we create the list containing the data.
+
+```{r}
+# list containing data
+n_states = 2 # number of states: juvenile vs adult
+dat <- list(
+    "n_states" = n_states,
+    "growth_first_idx" = ids,                                     # integer vector
+    "beta_linear_covs" = cbind(rep(1,nrow(data)), data$age),      # matrix with covariates for the transition state (intercept = 1 and age)
+    "age" = c(data$age),                                          # vector of age covariates (for the observations)
+    "len" = matrix(data$vt_sim, ncol = 1),                        # vector of observations
+    #"keyVar" = (numeric(n_states)),                              # initial state probabilities (can be estimated in the model, but here we assume fish are immature at the start of their life)
+    "id" = as.numeric(as.factor(data$id)) - 1                     # minus 1 because indexing in C++ starts at 0
+  )
+
+# list containing initial parameters
+
+```
+
+The model fitting is iterated 10 times. At each model fitting time, the initial values of the parameters are randomly selected from the 1000-value lists created above. The fitting results
+
+```{r, eval=F}
+# dataframe and lists to store model fitting results
+df_nll <- tibble()
+list_opt <- list()
+list_obj <- list()
+
+# for loop to iterate the model fitting, the loop stops after fitting 10 the model 10 times
+for(j in 1:100) {
+    print(paste("processing random par", j, sep = " "))
+    
+    # list of initial parameters, randomly selected from the 1000-value lists
+    par <- list(
+      "log_beta_linear_pars" = matrix(c(ini_loga, log(sample(list_tmat[j],1))),nrow = 2),         # parameter matrix correpsonding to the transition probability from juvenile to adult (slope and Tmat)
+      "v0"= sample(list_v0[j],1),
+      "log_h" = log(sample(list_h[j],1)),                                                
+      "logit_alpha" = logit(sample(list_alpha[j],1)),    
+      "logit_chi" = logit(sample(list_chi[j],1)),      
+      "log_prec" = log(2),  # high value for sigma (numerically more stable)
+      "log_sd_h" = log(sample(list_sd[j],1)),
+      "log_sd_tmat" = log(sample(list_sd[j],1)),
+      "trans_rho" = c(itrans_rev(sample(list_rho[j],1))), #rho_h_tmat, rho_h_alpha
+      "mu_random" = matrix(0, nrow = 2, ncol = length(unique(dat$id)))  # row 1 = log_h, row 2 = log_Tmat
+    )
+    
+    # create fitting object with data, initial parameters, indication of random effects, and model
+    obj <- TMB::MakeADFun(dat, 
+                          par,  
+                          random = "mu_random",
+                          map = list("log_beta_linear_pars" = factor(c(NA, 0))), #fix loga = log(100)
+                          DLL="hmm_quince_model")
+    
+    # next/break when there is error in opt
+    if ( is.null(tryCatch({
+      # fitting using nlminb
+      opt <- nlminb(obj$par, obj$fn, obj$gr,
+                      control = list(iter.max = 10000, eval.max = 10000))
+      
+      #opt <- do.call("optim",obj)
+      
+      m_name <- paste("rep", j, sep = "_")
+      
+      # save fitting info
+      list_opt[[m_name]] <- opt
+      list_obj[[m_name]] <- obj
+      
+      df_nll_temp <- tibble(
+        m_name = m_name,
+        nll = opt$objective,
+        convergence = opt$convergence,
+        message = opt$message) 
+      df_nll <- bind_rows(df_nll, df_nll_temp)
+      
+    }, error = function(e){}))) {
+      print("error");
+      next
+    }
+    
+    # end the loop after 10 fitting times
+    if (nrow(df_nll) == 10) {
+      print("run 10 times, stop")
+      break
+    }
+}
+
+# save results
+write_rds(df_nll, "supplement_df_nll.rds")
+write_rds(list_opt, "supplement_list_opt.rds")
+write_rds(list_obj, "supplement_list_obj.rds")
+```
+
+# 4. Report
+
+```{r include=FALSE}
+# reload df_nll, list_opt, list_obj
+df_nll <- read_rds("supplement_df_nll.rds")
+list_opt <- read_rds("supplement_list_opt.rds")
+list_obj <- read_rds("supplement_list_obj.rds")
+```
+
+The best fit (converged fit with the lowest negative log-likelihood) was rep_6.
+
+```{r}
+df_nll %>% arrange(nll)
+```
+
+The estimated parameters are very closed to the simulated parameters (bias within ±5%)
+
+```{r}
+tibble(par_name = c("Tmat", "v0", "h", "alpha", "chi", "prec", "sd_h", "sd_Tmat", "rho_h_Tmat"),
+       par_est = transpar(list_opt[["rep_6"]]),
+       par_sim = c(1.8, 30, 115, 0.35, 0.75, 300, 0.2, 0.2, -0.7),
+       bias = (par_est-par_sim)/par_sim*100)  %>%
+    mutate_if(is.numeric, round, 2)
+```
+
+The standard deviation of the estimated parameters can be obtained using the *sdreport()* function.
+
+```{r}
+sdrep <- TMB::sdreport(list_obj[["rep_6"]]) #4bc rep_309, 7a rep_350, 8ab rep_967
+sdrep_sum <- summary(sdrep)
+sdrep_sum <- as.data.frame(sdrep_sum) %>% mutate(pars = row.names(sdrep_sum))
+```
+
+```{r}
+sdrep_sum %>% filter(pars %in% c("Tmat_mean", "v0", "h_mean", "alpha", "chi", "prec", "sd_h", "sd_tmat", "rho_h_tmat")) %>%
+    unique() %>%
+    select(Estimate, `Std. Error`) %>%
+    mutate_if(is.numeric, round, 2)
+```
+
+Finally, we can examine the fit by plotting the estimated growth curves (lines) onto the data (points).
+
+```{r}
+#### data rep
+# get report from obj
+obj <- list_obj[["rep_6"]]
+rep <- obj$report() 
+
+# data rep
+data_rep <- data %>% 
+    mutate(mu_juv = rep$mu[,1],
+           mu_adu = rep$mu[,2],
+           mu = if_else(age <= Tmat, mu_juv, mu_adu)) %>%
+    filter(age >= 1)
+
+ggplot(data = data_rep) +
+    geom_point(aes(x = age, y = vt_sim, group = id)) +
+    geom_line(aes(x = age, y = mu, group = id), alpha = 0.5) +
+    labs(x = "Age (year)",
+         y = "Length (mm)") +
+    theme_bw()
+```
+
+# 5. References
