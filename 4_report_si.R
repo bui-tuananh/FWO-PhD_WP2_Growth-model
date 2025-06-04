@@ -331,6 +331,7 @@ ggsave(filename = "./report/figSI_corTmatReproduction.png",
        width = 17,
        height = 7,
        unit = "cm",
+       dpi = 600,
        scale = 1.8)
 
 ggsave(last_plot(), file = "./report/figSI_corTmatReproduction.pdf",
@@ -436,6 +437,7 @@ ggsave(filename = "./report/figSI_backcal_vs_sur.png",
        width = 17,
        height = 17,
        unit = "cm",
+       dpi = 600,
        scale = 1.2)
 
 ggsave(last_plot(), file = "./report/figSI_backcal_vs_sur.pdf",

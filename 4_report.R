@@ -397,6 +397,7 @@ ggsave(filename = "./report/fig2_concept_QuinceModel.png",
        width = 17,
        height = 9,
        unit = "cm",
+       dpi = 600,
        scale = 1.5)
 
 ggsave(last_plot(), file = "./report/fig2_concept_QuinceModel.pdf",
@@ -514,6 +515,7 @@ ggsave(filename = "./report/fig3_simulation_bias.png",
        width = 17,
        height = 12,
        unit = "cm",
+       dpi = 600,
        scale = 1.2)
 
 ggsave(last_plot(), file = "./report/fig3_simulation_bias.pdf",
@@ -688,6 +690,7 @@ ggsave(filename = "./report/fig4_predVsObs.png",
        width = 17,
        height = 9,
        unit = "cm",
+       dpi = 600,
        scale = 2)
 
 ggsave(last_plot(), file = "./report/fig4_predVsObs.pdf",
@@ -750,6 +753,7 @@ ggsave(filename = "./report/fig5_lp50.png",
        width = 17,
        height = 9,
        unit = "cm",
+       dpi = 600,
        scale = 1.2)
 
 ggsave(last_plot(), file = "./report/fig5_lp50.pdf",
@@ -889,6 +893,7 @@ ggsave(filename = "./report/fig6_distribution_h_Tmat_vinf.png",
        width = 17,
        height = 7,
        unit = "cm",
+       dpi = 600,
        scale = 1)
 
 ggsave(last_plot(), file = "./report/fig6_distribution_h_Tmat_vinf.pdf",
@@ -975,6 +980,7 @@ ggsave(filename = "./report/fig7_1p_g.png",
        width = 17,
        height = 15,
        unit = "cm",
+       dpi = 600,
        scale = 1)
 
 ggsave(last_plot(), file = "./report/fig7_1p_g.pdf",
@@ -997,6 +1003,7 @@ ggsave(filename = "./report/fig8_correlation_h_Tmat.png",
        width = 17,
        height = 9,
        unit = "cm",
+       dpi = 600,
        scale = 1)
 
 ggsave(last_plot(), file = "./report/fig8_correlation_h_Tmat.pdf",
@@ -1066,6 +1073,7 @@ ggsave(filename = "./report/fig9_trend_Tmat.png",
        width = 17,
        height = 7,
        unit = "cm",
+       dpi = 600,
        scale = 1.5)
 
 ggsave(last_plot(), file = "./report/fig9_trend_Tmat.pdf",
