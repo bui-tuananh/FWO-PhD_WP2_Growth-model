@@ -294,6 +294,8 @@ Type objective_function<Type>::operator() ()
   int max_age = 15;  // maximum age for prediction
   vector<Type> pred_mean_juv(max_age);
   vector<Type> pred_mean_adu(max_age);
+  vector<Type> p_mean(max_age);
+  vector<Type> one_minus_p_mean(max_age);
   vector<Type> g_prime_mean(max_age);
   for(int i = 0; i < max_age; i++){
         Type a = i+1; // age (+1 as index starts from 0)
@@ -303,6 +305,10 @@ Type objective_function<Type>::operator() ()
 
         // adult growth
         pred_mean_adu(i) = vinf_mean - (vinf_mean - vT_mean)*exp(-k*(a-Tmat_mean));
+        
+        // p
+        p_mean(i) = alpha*pow(chi, a - (Tmat_mean + 1)); //^(a - (Tmat_mean + 1))
+        one_minus_p_mean(i) = 1 - p_mean(i);
 
         // g_prime
         g_prime_mean(i) = (3*h_mean/(vinf_mean - vc_mean))*(1 - (vc_mean/pred_mean_adu(i)));
@@ -313,6 +319,8 @@ Type objective_function<Type>::operator() ()
   ADREPORT(vc_mean);
   ADREPORT(pred_mean_juv);
   ADREPORT(pred_mean_adu);
+  ADREPORT(p_mean);
+  ADREPORT(one_minus_p_mean);
   ADREPORT(g_prime_mean);
   
   // nll
