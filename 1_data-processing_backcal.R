@@ -1,5 +1,5 @@
 # info ----
-# input: otl_full.rds (finalised data from WP1 - https://github.com/bui-tuananh/FWO-PhD_WP1_Growth-linear-mixed-model)
+# input: otl_full.rds 
 # output: otl_full_backcal.rds
 
 # setup ----
@@ -27,6 +27,7 @@ otl_sub <- otl %>%
            otl_width = OtolithWidth.um,
            body_len = Length.mm,
            month = month(SamplingDate),
+           datasource = DataSource,
            pop = IcesAreaGroup) %>%
     select(id:pop)
 

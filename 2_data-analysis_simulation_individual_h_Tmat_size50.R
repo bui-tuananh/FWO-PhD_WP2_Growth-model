@@ -118,28 +118,33 @@ fn_sim <- function(seed = 2018, # seed for random generator, allowing reproducib
     geom_line(data = data_pop, aes(x = age, y = vt_true, group = id)) +
     labs(x = "Age (year)",
          y = "Length (mm)") +
-    theme_
+    theme_bw()
   
   # return data and plot
   return(list(data_pop, p))
 }
-
 
 # model ----
 df_nll <- tibble()
 list_opt <- list()
 list_obj <- list()
 
-for(i in 1:1000) {
+# df_nll <- read_rds("./output/backcal_hmm_simulation_h_Tmat_v2_nll_size50.rds")
+# list_opt <- read_rds("./output/backcal_hmm_simulation_h_Tmat_v2_opt_size50.rds")
+# list_obj <- read_rds("./output/backcal_hmm_simulation_h_Tmat_v2_obj_size50.rds")
+
+n_sample = 50
+for(i in 1:10000) {
   print(paste0("processing ", i))
   set.seed(i)
   #### sampled data
   #id_sample <- sample(data_pop$id, size = sample_size[s], replace = F)
   
-  data <- fn_sim(i)[[1]]
+  data_all <- fn_sim(i)[[1]]
+  data <- data_all %>% filter(id %in% sample(unique(data_all$id), n_sample))
   data <- data %>% 
     group_by(id) %>%
-    mutate(year_adult = sum(!is.na(g))) #number of year with non-na g
+    mutate(year_adult = sum(!is.na(g_prime))) #number of year with non-na g
   
   if(min(data$year_adult) < 1) {
     print(paste("minimum year adult <", 1, sep = " "))
@@ -155,17 +160,11 @@ for(i in 1:1000) {
   setDT(data)               # convert to datatable class
   setorder(data, id, age)   # rearrange by id and age 
   
-  data[ , len.incr:= vt_sim - shift(vt_sim, 1,type = "lag", fill = NA) , by = id]
-  setDF(data)
-  # fill in length at age 1
-  data$len.incr[is.na(data$len.incr)] <- data$vt_sim[is.na(data$len.incr)]
-  
   dat.ls <- split(data, f = data$id)
   dat.ls <- lapply(dat.ls, function(x){
     x0 <- x[1,]
     x0$age = 0
     x0$vt_sim = NA
-    x0$len.incr = NA
     rbind(x0,x)
   })
   
@@ -235,7 +234,9 @@ for(i in 1:1000) {
     
     # next/break when there is error in opt
     if ( is.null(tryCatch({
-      opt <- do.call("optim",obj)
+      # opt <- do.call("optim",obj)
+      opt <- nlminb(obj$par, obj$fn, obj$gr,
+                    control = list(iter.max = 10000, eval.max = 10000))
       
       ite_name <- paste("ite", i, sep = "_")
       m_name <- paste("ite", i, "rep", j, sep = "_")
@@ -246,7 +247,11 @@ for(i in 1:1000) {
       df_nll_temp <- tibble(#ite_id = i,
         ite_name = ite_name, 
         m_name = m_name,
-        nll = opt$value) 
+        #nll = opt$value,
+        nll = opt$objective, #nlminb - objective instead of value
+        convergence = opt$convergence,
+        message = opt$message
+        ) 
       df_nll_ite <- bind_rows(df_nll_ite, df_nll_temp)
       df_nll <- bind_rows(df_nll, df_nll_temp)
       
@@ -255,9 +260,9 @@ for(i in 1:1000) {
       next
     }
     
-    write_rds(df_nll, "./output/backcal_hmm_simulation_h_Tmat_v2_nll.rds")
-    write_rds(list_opt, "./output/backcal_hmm_simulation_h_Tmat_v2_opt.rds")
-    write_rds(list_obj, "./output/backcal_hmm_simulation_h_Tmat_v2_obj.rds")
+    write_rds(df_nll, "./output/backcal_hmm_simulation_h_Tmat_v2_nll_size50.rds")
+    write_rds(list_opt, "./output/backcal_hmm_simulation_h_Tmat_v2_opt_size50.rds")
+    write_rds(list_obj, "./output/backcal_hmm_simulation_h_Tmat_v2_obj_size50.rds")
     
     
     if (nrow(df_nll_ite) == 10) {
@@ -265,12 +270,17 @@ for(i in 1:1000) {
       break
     }
     
+    if (j == 100 & nrow(df_nll_ite) != 10) {
+        print("cannot reach 10 times")
+        break
+    }
+    
   }
   
-  if (nrow(df_nll) == 1000) {
-    print("run 1000 times, end")
+  n_ite = length(unique(filter(df_nll, message == "relative convergence (4)")$ite_name))
+  if (n_ite == 100) {
+    print("iterate 100 times, end")
     break
   }
   
 }
-  

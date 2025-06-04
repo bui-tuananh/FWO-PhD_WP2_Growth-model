@@ -331,12 +331,8 @@ data_rep <- read_rds("output/individual_h_Tmat_a100_age0_datarep_v2.rds")
 
 # calculate Amat
 data_rep <- data_rep %>%
-  mutate(Tmat_roundup = if_else(round(Tmat) > Tmat, round(Tmat), round(Tmat) + 1)) %>%
-  #mutate(Amat = if_else(Tmat_roundup - Tmat >= 1/3, Tmat_roundup, Tmat_roundup + 1)) %>%
-  #mutate(Amat = if_else(Tmat_roundup - Tmat >= 1/2, Tmat_roundup, Tmat_roundup + 1)) %>%
-  mutate(Amat = Tmat_roundup) %>%
-  mutate(maturity = if_else(age < Amat, 0, 1)) %>%
-  mutate(length = vt_sim)
+    mutate(maturity = if_else(age < Tmat, 0, 1)) %>%
+    mutate(length = backcal_len)
 
 pred_lp50_growth <- tibble()
 for(p in c("4bc", "7a")) {

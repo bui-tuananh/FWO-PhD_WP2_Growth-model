@@ -38,21 +38,14 @@ data <- data %>%
            cohort_int = as.numeric(factor(cohort))-1)
 
 # add age 0 observation with NA
-# calculate growth increments
 setDT(data)               # convert to datatable class
 setorder(data, id, age)   # rearrange by id and age
-
-data[ , len.incr:= backcal_len - shift(backcal_len, 1,type = "lag", fill = NA) , by = id]
-setDF(data)
-# fill in length at age 1
-data$len.incr[is.na(data$len.incr)] <- data$backcal_len[is.na(data$len.incr)]
 
 dat.ls <- split(data, f = data$id)
 dat.ls <- lapply(dat.ls, function(x){
     x0 <- x[1,]
     x0$age = 0
     x0$backcal_len = NA
-    x0$len.incr = NA
     rbind(x0,x)
 })
 

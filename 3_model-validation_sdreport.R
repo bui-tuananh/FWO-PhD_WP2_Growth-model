@@ -69,15 +69,11 @@ for(i in 1:3) {
     df_nll <- read_rds(file.path("./output", paste0("backcal_", df_nll_best$pop[i], "_individual_h_Tmat_prec_a100_age0_rep1000_v2_nll.rds")))
     list_opt <- read_rds(file.path("./output", paste0("backcal_", df_nll_best$pop[i], "_individual_h_Tmat_prec_a100_age0_rep1000_v2_opt.rds")))
     list_obj <- read_rds(file.path("./output", paste0("backcal_", df_nll_best$pop[i], "_individual_h_Tmat_prec_a100_age0_rep1000_v2_obj.rds")))
-    # saved rep and sdrep below to avoid load list_obj here
     
     #### report
     obj <- list_obj[[df_nll_best$m_name[i]]]
     
     rep <- obj$report()
-    write_rds(rep, paste0("output/individual_h_Tmat_a100_age0_rep_", df_nll_best$pop[i], "_v2.rds"))
-    rep  <-  read_rds(paste0("output/individual_h_Tmat_a100_age0_rep_", df_nll_best$pop[i], "_v2.rds"))
-    # note: save rep to avoid load obj
     
     #### sdreport
     sdrep <- TMB::sdreport(obj)

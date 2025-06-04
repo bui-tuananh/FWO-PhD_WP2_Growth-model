@@ -256,7 +256,7 @@ sur_sub <- sur_sub %>%
     select(id, pop, age, year, month, cohort, length)
 ## data rep ----
 # results from model
-data_rep <- read_rds("output/need to check/individual_h_Tmat_a100_age0_datarep_v2.rds") %>%
+data_rep <- read_rds("output/individual_h_Tmat_a100_age0_datarep_v2.rds") %>%
     left_join(df_pop3)
 
 # figSI - T and reproductive investment ----
@@ -531,67 +531,3 @@ print(m_best)
 # estimates - best model OK
 transpar(list_opt[[m_best]]) 
 
-# figSI - pred vs obs all pops ----
-ggplot() +
-    geom_point(data = data_rep, aes(x = age, y = vt_sim, group = id), alpha = 0.1) +
-    geom_line(data = data_rep, aes(x = age, y = mu, group = id), alpha = 0.1) +
-    labs(x = "Age (years)",
-         y = "Length (mm)") +
-    facet_grid(~ pop_name)
-
-ggsave(filename = "./report/figSI_predVsObs_all.png",
-       plot = last_plot(),
-       width = 17,
-       height = 9,
-       unit = "cm",
-       scale = 1.5)
-
-ggsave(last_plot(), file = "./report/figSI_predVsObs_all.pdf",
-       device = cairo_pdf,
-       width =  17*1.5, height = 9*1.5,
-       units = "cm") 
-
-# figSI - g_prime ----
-sdrep_sum_all <- tibble()
-for(p in c("4bc", "7a")) {
-    sdrep_sum_temp <- read_rds(paste0("output/individual_h_Tmat_a100_age0_sdrepsum_", p, "_v2.rds")) %>%
-        mutate(pop = p) 
-    sdrep_sum_all <- bind_rows(sdrep_sum_all, sdrep_sum_temp) 
-}
-sdrep_sum_all <- sdrep_sum_all %>%
-    left_join(df_pop)
-
-# df_g
-df_g <- sdrep_sum_all %>%
-    filter(pars == "g_prime_mean") %>%
-    mutate(age = rep(seq(1,15), 2),
-           g_prime_est = Estimate,
-           g_prime_se = `Std. Error`)
-
-list_plot <- list()
-for(p in c("4bc", "7a")) {
-    ggplot(data = df_g %>% filter(age >= 2, pop == p), aes(x = age, g_prime_est)) +
-        geom_line() +
-        geom_ribbon(aes(ymin = g_prime_est - g_prime_se,
-                        ymax = g_prime_est + g_prime_se),
-                    alpha = 0.5) +
-        facet_wrap(~ pop_name) +
-        labs(x = "Age (years)",
-             y = expression(italic("g'")))
-    list_plot[[p]] <- last_plot()
-}
-
-(list_plot[["4bc"]] | list_plot[["7a"]]) +
-    plot_annotation(tag_levels = "A")
-
-ggsave(filename = "./report/figSI_g_prime.png",
-       plot = last_plot(),
-       width = 17,
-       height = 7,
-       unit = "cm",
-       scale = 1.2)
-
-ggsave(last_plot(), file = "./report/figSI_g_prime.pdf",
-       device = cairo_pdf,
-       width =  17*1.2, height = 7*1.2,
-       units = "cm") 
